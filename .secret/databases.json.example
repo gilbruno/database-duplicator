@@ -1,0 +1,18 @@
+{
+    "list": [
+        {
+            "name": "host1",
+            "host": "34.77.65.63",
+            "user": "",
+            "password": "",
+            "port": ""
+        },
+        {
+            "name": "host2",
+            "host": "34.22.142.20",
+            "user": "",
+            "password": "",
+            "port": ""
+        }
+    ]
+}
