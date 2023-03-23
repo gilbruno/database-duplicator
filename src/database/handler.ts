@@ -2,6 +2,7 @@ import { EnvList, Db, SqlEngine } from "../types/database"
 import { Answer } from "../types/inquirer"
 import Utils from "../utils/utils"
 import mysql from 'mysql2/promise'
+import { showSuccessWithLogSymbol } from "../utils/logger"
 
 /**
  * class that handle the Database
@@ -17,9 +18,9 @@ class Handler {
     public databaseTarget: string
     public useLastCreateTableScripts: boolean
 
-    // private CREATE_DATABASE   = `CREATE DATABASE {{dbName}} DEFAULT CHARACTER SET = 'utf8mb4'`
-    // private SHOW_CREATE_TABLE = 'show create table {{tableName}}'
-    // private SHOW_TABLES       = 'show tables' as const
+    private CREATE_DATABASE   = `CREATE DATABASE {{dbName}} DEFAULT CHARACTER SET = 'utf8mb4'`
+    private SHOW_CREATE_TABLE = 'show create table {{tableName}}'
+    private SHOW_TABLES       = 'show tables' as const
     private SHOW_DATABASES    = 'show databases' as const
     private SHOW_SQL_ENGINE   = "show variables like 'pid_file'" as const
     private SCRIPTS_BASE_DIR  = '/scripts' as const 
@@ -128,7 +129,113 @@ class Handler {
         return sqlEngine
     }
 
+    //----------------------------------------------------------------------------------------------------------
+    public async createDataBase() 
+    {
+        const createDataBase = this.CREATE_DATABASE.replace('{{dbName}}', this.databaseTarget)
+        await this.genericPool[this.environmentTarget].query(createDataBase)
+    }
+
+    //----------------------------------------------------------------------------------------------------------
+    public async showTables(databaseName: string) 
+    {
+        const response = await this.pools[databaseName].query(this.SHOW_TABLES)
+        let tables = response[0].map(
+            (item: any) => {
+                return item[`Tables_in_${databaseName}`]
+            }
+        )
+        return tables
+    }
     
+    //----------------------------------------------------------------------------------------------------------
+    public async showCreateTable(tableName: string) 
+    {
+        const showCreateTable = this.SHOW_CREATE_TABLE.replace('{{tableName}}', tableName)
+        const response = await this.pools[this.databaseSource].query(showCreateTable)
+        return response[0][0]['Create Table']
+    }
+
+    //----------------------------------------------------------------------------------------------------------
+    public async areSqlEnginesIdentical(hostSource: string, hostTarget: string)
+    {
+        let areIdentical = false
+        const sqlEngineSource = await this.getSqlEngine(hostSource)
+        const sqlEngineTarget = await this.getSqlEngine(hostTarget)
+        if (sqlEngineSource !== '' && sqlEngineTarget !== '') {
+            if (sqlEngineSource === sqlEngineTarget) {
+                areIdentical = true
+            }
+        }
+        return areIdentical
+
+    }
+    
+    //----------------------------------------------------------------------------------------------------------
+    private getCreateTablesScript(sqlEngine: SqlEngine)
+    {
+        return `${process.cwd()}/dist/database/scripts/${sqlEngine}/create_tables.sql`
+    }
+
+    //----------------------------------------------------------------------------------------------------------
+    public async createTables() 
+    {
+        const databaseCredentials  = this.envList[this.environmentTarget]
+        const sqlEngineTarget      = await this.getSqlEngine(this.environmentTarget)
+        const pathCreateTablesFile = this.getCreateTablesScript(sqlEngineTarget)
+        const escapedPwd           = Utils.escapeSpecialChars(databaseCredentials.password)
+        const dumpCmd = `mysql -u${databaseCredentials.user} -p${escapedPwd} -h${databaseCredentials.host} ${this.databaseTarget} < ${pathCreateTablesFile}`
+        await Utils.executeShellCommand(dumpCmd)
+        showSuccessWithLogSymbol(`SQL Tables created ...`)
+    }
+
+    //----------------------------------------------------------------------------------------------------------
+    public async createTargetTables(sqlCreateTable: string)
+    {
+        await this.pools[this.databaseTarget].query(sqlCreateTable)
+    }
+    
+    //----------------------------------------------------------------------------------------------------------
+    public async createDumpFile(pathDumpFile: string, noCreateTables: boolean) {
+        
+        const databaseCredentials = this.envList[this.environmentSource]
+        const escapedPwd = Utils.escapeSpecialChars(databaseCredentials.password)
+        let noCreateTablesOptions = (noCreateTables)?'--no-create-info':''
+        const dumpCmd = `mysqldump --skip-comments ${noCreateTablesOptions} -u${databaseCredentials.user} -p${escapedPwd} -h${databaseCredentials.host} --compact ${this.databaseSource} > ${pathDumpFile}`
+        await Utils.executeShellCommand(dumpCmd)
+        showSuccessWithLogSymbol(`MySQL Dump created ...`)
+    }
+
+    //----------------------------------------------------------------------------------------------------------
+    public async writeTablesScripts(tables: string[]) 
+    {
+        for (let i = 0; i < tables.length; i++) {
+            const bufferScript = await this.showCreateTable(tables[i])
+            Utils.writeFile(`${this.SCRIPTS_BASE_DIR}/create_table`, `${tables[i]}.sql`, bufferScript)
+        }    
+    }
+
+    //----------------------------------------------------------------------------------------------------------
+    public writeMigrationScripts(tables: string[], dbSource: string) 
+    {
+        for (let i = 0; i < tables.length; i++) {
+            let bufferScript = `INSERT INTO ${tables[i]}\n`
+            bufferScript += `SELECT * FROM ${dbSource}.${tables[i]}`
+            Utils.writeFile(`${this.SCRIPTS_BASE_DIR}/migrations`, `migration.${tables[i]}.sql`, bufferScript)
+        }    
+    }
+
+    //----------------------------------------------------------------------------------------------------------
+    public async importDumpFile(pathDumpFile: string) 
+    {
+        const databaseCredentials = this.envList[this.environmentTarget]
+        const escapedPwd = Utils.escapeSpecialChars(databaseCredentials.password)
+        const dumpCmd = `mysql -u${databaseCredentials.user} -p${escapedPwd} -h${databaseCredentials.host} ${this.databaseTarget} < ${pathDumpFile}`
+        await Utils.executeShellCommand(dumpCmd)
+        showSuccessWithLogSymbol(`MySQL Dump imported in ${this.environmentTarget}:${this.databaseTarget} `)
+
+    }
+
     //----------------------------------------------------------------------------------------------------------
     /*
     private releasePools() 
