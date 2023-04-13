@@ -60,14 +60,20 @@ class Utils {
     public static async getEnvironmentsList()
     {
         let envList: EnvList = {}
-        const pathDbCredentials = process.cwd()+ `/.secret/databases.json`
-        const databaseCredentials: DbList = require(pathDbCredentials)
+        const databaseCredentials: DbList = require(process.cwd()+'/.secret/databases.json')
         const databases = databaseCredentials.list
         for (let i = 0; i < databases.length; i++) {
             const db: Db = databases[i]
             envList[db.name] = db
         }    
         return envList
+    }
+
+    //----------------------------------------------------------------------------------------------------------
+    public static async getCredentialsByEnv(env: string)
+    {
+        const envList = await this.getEnvironmentsList()
+        return envList[env]
     }
 
     //----------------------------------------------------------------------------------------------------------
@@ -86,7 +92,7 @@ class Utils {
 
     //----------------------------------------------------------------------------------------------------------
     public static escapeSpecialChars(str: string) {
-        const escapedString = str.replace(/[.*+?^&~`"${}()|[\]\\]/g, '\\$&')
+        const escapedString = str.replace(/[.*+?^&~;`"${}()|[\]\\]/g, '\\$&')
         return escapedString
     }
 

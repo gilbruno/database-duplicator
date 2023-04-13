@@ -1,8 +1,11 @@
-import { EnvList, Db, SqlEngine } from "../types/database"
-import { Answer } from "../types/inquirer"
-import Utils from "../utils/utils"
+import {Answer}  from '../types/inquirer'
 import mysql from 'mysql2/promise'
-import { showSuccessWithLogSymbol } from "../utils/logger"
+import { Db, EnvList, SqlEngine } from '../types/database'
+import Utils from '../utils/utils'
+import { showSuccessWithLogSymbol } from '../utils/logger'
+import Migrator from '../runner/migrator'
+
+//import { exec } from 'child_process'
 
 /**
  * class that handle the Database
@@ -77,11 +80,9 @@ class Handler {
     }
 
     //----------------------------------------------------------------------------------------------------------
-    public setPool(dbName: string, environment: string) 
+    public async setPool(dbName: string, environment: string) 
     {
-        const envName = environment
-        const pathCredentials = process.cwd()+`/.secret/database.${envName}`
-        const databaseCredentials: Db = require(pathCredentials)
+        const databaseCredentials: Db = await Utils.getCredentialsByEnv(environment)
         if (this.pools === undefined || this.pools[dbName] === undefined) {
             const pool = mysql.createPool(
                 {
@@ -94,6 +95,68 @@ class Handler {
             )
             this.pools[dbName] = pool
             }    
+    }
+
+    //----------------------------------------------------------------------------------------------------------
+    private releasePools() 
+    {
+        for (const key in this.genericPool) {
+            this.genericPool[key]?.end()
+        }
+        
+        for (const key in this.pools) {
+            this.pools[key]?.end()
+        }
+    }
+
+    //----------------------------------------------------------------------------------------------------------
+    public async showCreateTable(tableName: string) 
+    {
+        const showCreateTable = this.SHOW_CREATE_TABLE.replace('{{tableName}}', tableName)
+        const response = await this.pools[this.databaseSource].query(showCreateTable)
+        return response[0][0]['Create Table']
+    }
+
+    //----------------------------------------------------------------------------------------------------------
+    public async showTables(databaseName: string) 
+    {
+        const response = await this.pools[databaseName].query(this.SHOW_TABLES)
+        let tables = response[0].map(
+            (item: any) => {
+                return item[`Tables_in_${databaseName}`]
+            }
+        )
+        return tables
+    }
+
+    //----------------------------------------------------------------------------------------------------------
+    public async getSqlEngine(host: string): Promise<SqlEngine>
+    {
+        let sqlEngine: SqlEngine = '' 
+        const response: any = await this.genericPool[host].query(this.SHOW_SQL_ENGINE)
+        const pidFile = response[0][0]['Value']
+        if (pidFile.includes(this.MYSQL)) {
+            sqlEngine = this.MYSQL
+        }
+        if (pidFile.includes(this.MEMSQL)) {
+            sqlEngine = this.MEMSQL
+        }
+        return sqlEngine
+    }
+
+    //----------------------------------------------------------------------------------------------------------
+    public async areSqlEnginesIdentical(hostSource: string, hostTarget: string)
+    {
+        let areIdentical = false
+        const sqlEngineSource = await this.getSqlEngine(hostSource)
+        const sqlEngineTarget = await this.getSqlEngine(hostTarget)
+        if (sqlEngineSource !== '' && sqlEngineTarget !== '') {
+            if (sqlEngineSource === sqlEngineTarget) {
+                areIdentical = true
+            }
+        }
+        return areIdentical
+
     }
 
     //----------------------------------------------------------------------------------------------------------
@@ -113,20 +176,67 @@ class Handler {
         })
         return dbList
     }
+
+    //----------------------------------------------------------------------------------------------------------
+    public async createTargetTables(sqlCreateTable: string)
+    {
+        await this.pools[this.databaseTarget].query(sqlCreateTable)
+    }
+
+    //----------------------------------------------------------------------------------------------------------
+    public async createDumpFile(pathDumpFile: string, noCreateTables: boolean) {
+        
+        const databaseCredentials = this.envList[this.environmentSource]
+        const escapedPwd = Utils.escapeSpecialChars(databaseCredentials.password)
+        let noCreateTablesOptions = (noCreateTables)?'--no-create-info':''
+        const dumpCmd = `mysqldump --skip-comments ${noCreateTablesOptions} -u${databaseCredentials.user} -p${escapedPwd} -h${databaseCredentials.host} --compact ${this.databaseSource} > ${pathDumpFile}`
+        await Utils.executeShellCommand(dumpCmd)
+        showSuccessWithLogSymbol(`MySQL Dump created ...`)
+    }
+
+    //----------------------------------------------------------------------------------------------------------
+    public async importDumpFile(pathDumpFile: string) 
+    {
+        const databaseCredentials = this.envList[this.environmentTarget]
+        const escapedPwd = Utils.escapeSpecialChars(databaseCredentials.password)
+        const dumpCmd = `mysql -u${databaseCredentials.user} -p${escapedPwd} -h${databaseCredentials.host} ${this.databaseTarget} < ${pathDumpFile}`
+        await Utils.executeShellCommand(dumpCmd)
+        showSuccessWithLogSymbol(`MySQL Dump imported in ${this.environmentTarget}:${this.databaseTarget} `)
+
+    }
+
+    //----------------------------------------------------------------------------------------------------------
+    /**
+     * TODO : Not implemented yes
+     * @param environment 
+     * @param dbName 
+     */
+    public async importData(environment: string, dbName: string) 
+    {
+        console.log(environment)
+        console.log(dbName)
+        //await this.readCsvFile()
+    }
+
+    //----------------------------------------------------------------------------------------------------------
+    public async getDataType(tableName:string, dbName: string, environment: string) 
+    {
+        const sql = `select COLUMN_NAME, DATA_TYPE from information_schema.columns where table_schema = '${dbName}' and table_name = '${tableName}`
+        const dataTypes = await this.genericPool[environment].query(sql)
+        return dataTypes
+    }
+
     
     //----------------------------------------------------------------------------------------------------------
-    public async getSqlEngine(host: string): Promise<SqlEngine>
+    public async migrateTargetTables(sqlMigrateTable: string)
     {
-        let sqlEngine: SqlEngine = '' 
-        const response: any = await this.genericPool[host].query(this.SHOW_SQL_ENGINE)
-        const pidFile = response[0][0]['Value']
-        if (pidFile.includes(this.MYSQL)) {
-            sqlEngine = this.MYSQL
-        }
-        if (pidFile.includes(this.MEMSQL)) {
-            sqlEngine = this.MEMSQL
-        }
-        return sqlEngine
+        await this.pools[this.databaseTarget].query(sqlMigrateTable)
+    }
+
+    //----------------------------------------------------------------------------------------------------------
+    private getCreateTablesScript(sqlEngine: SqlEngine)
+    {
+        return `${process.cwd()}/dist/database/scripts/${sqlEngine}/create_tables.sql`
     }
 
     //----------------------------------------------------------------------------------------------------------
@@ -134,47 +244,6 @@ class Handler {
     {
         const createDataBase = this.CREATE_DATABASE.replace('{{dbName}}', this.databaseTarget)
         await this.genericPool[this.environmentTarget].query(createDataBase)
-    }
-
-    //----------------------------------------------------------------------------------------------------------
-    public async showTables(databaseName: string) 
-    {
-        const response = await this.pools[databaseName].query(this.SHOW_TABLES)
-        let tables = response[0].map(
-            (item: any) => {
-                return item[`Tables_in_${databaseName}`]
-            }
-        )
-        return tables
-    }
-    
-    //----------------------------------------------------------------------------------------------------------
-    public async showCreateTable(tableName: string) 
-    {
-        const showCreateTable = this.SHOW_CREATE_TABLE.replace('{{tableName}}', tableName)
-        const response = await this.pools[this.databaseSource].query(showCreateTable)
-        return response[0][0]['Create Table']
-    }
-
-    //----------------------------------------------------------------------------------------------------------
-    public async areSqlEnginesIdentical(hostSource: string, hostTarget: string)
-    {
-        let areIdentical = false
-        const sqlEngineSource = await this.getSqlEngine(hostSource)
-        const sqlEngineTarget = await this.getSqlEngine(hostTarget)
-        if (sqlEngineSource !== '' && sqlEngineTarget !== '') {
-            if (sqlEngineSource === sqlEngineTarget) {
-                areIdentical = true
-            }
-        }
-        return areIdentical
-
-    }
-    
-    //----------------------------------------------------------------------------------------------------------
-    private getCreateTablesScript(sqlEngine: SqlEngine)
-    {
-        return `${process.cwd()}/dist/database/scripts/${sqlEngine}/create_tables.sql`
     }
 
     //----------------------------------------------------------------------------------------------------------
@@ -190,20 +259,9 @@ class Handler {
     }
 
     //----------------------------------------------------------------------------------------------------------
-    public async createTargetTables(sqlCreateTable: string)
-    {
-        await this.pools[this.databaseTarget].query(sqlCreateTable)
-    }
-    
-    //----------------------------------------------------------------------------------------------------------
-    public async createDumpFile(pathDumpFile: string, noCreateTables: boolean) {
-        
-        const databaseCredentials = this.envList[this.environmentSource]
-        const escapedPwd = Utils.escapeSpecialChars(databaseCredentials.password)
-        let noCreateTablesOptions = (noCreateTables)?'--no-create-info':''
-        const dumpCmd = `mysqldump --skip-comments ${noCreateTablesOptions} -u${databaseCredentials.user} -p${escapedPwd} -h${databaseCredentials.host} --compact ${this.databaseSource} > ${pathDumpFile}`
-        await Utils.executeShellCommand(dumpCmd)
-        showSuccessWithLogSymbol(`MySQL Dump created ...`)
+    public getCreateDatabaseScript(dbName: string) {
+        const createDataBase = this.CREATE_DATABASE.replace('{{dbName}}', dbName)
+        return createDataBase
     }
 
     //----------------------------------------------------------------------------------------------------------
@@ -224,31 +282,40 @@ class Handler {
             Utils.writeFile(`${this.SCRIPTS_BASE_DIR}/migrations`, `migration.${tables[i]}.sql`, bufferScript)
         }    
     }
-
+    
     //----------------------------------------------------------------------------------------------------------
-    public async importDumpFile(pathDumpFile: string) 
+    public async processDatabaseCreationMultiServers(_answers: Answer) 
     {
-        const databaseCredentials = this.envList[this.environmentTarget]
-        const escapedPwd = Utils.escapeSpecialChars(databaseCredentials.password)
-        const dumpCmd = `mysql -u${databaseCredentials.user} -p${escapedPwd} -h${databaseCredentials.host} ${this.databaseTarget} < ${pathDumpFile}`
-        await Utils.executeShellCommand(dumpCmd)
-        showSuccessWithLogSymbol(`MySQL Dump imported in ${this.environmentTarget}:${this.databaseTarget} `)
-
+        this.setup(_answers, true)
+        /********* MIGRATIONS *****************/
+        const migrator = new Migrator(this)
+        await migrator.run(false)
+        //Release SQL Pools
+        this.releasePools()
     }
 
     //----------------------------------------------------------------------------------------------------------
-    /*
-    private releasePools() 
+    public async processDatabaseCreationSingleServer(_answers: Answer) 
     {
-        for (const key in this.genericPool) {
-            this.genericPool[key]?.end()
-        }
-        
-        for (const key in this.pools) {
-            this.pools[key]?.end()
-        }
-    }*/
+        this.setup(_answers, true)
+        await this.setPool(this.databaseSource, this.environmentSource)
+        /********* MIGRATIONS *****************/
+        const migrator = new Migrator(this)
+        await migrator.run(true)
+        //Release SQL Pools
+        this.releasePools()
+    }
 
+    //----------------------------------------------------------------------------------------------------------
+    public async processDatabaseCreation(_answers: Answer) 
+    {
+        if (_answers.environmentSource === _answers.environmentTarget) {
+            await this.processDatabaseCreationSingleServer(_answers)
+        }
+        else {
+            await this.processDatabaseCreationMultiServers(_answers)
+        }
+    }
 }
 
 export default Handler
